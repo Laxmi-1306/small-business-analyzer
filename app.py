@@ -196,42 +196,84 @@ else:
 # ==========================================================
 # ================= UPLOAD EXCEL ===========================
 # ==========================================================
-    if page == "Upload Excel":
+   # ==========================================================
+# ================= SMART AUTO ANALYTICS ===================
+# ==========================================================
+if page == "Upload Excel":
 
-        st.header("📊 Advanced Analytics")
+    st.header("📊 Smart Auto Analytics (Any CSV / Excel)")
 
-        uploaded_file = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
+    uploaded_file = st.file_uploader("Upload Any CSV or Excel File", type=["csv", "xlsx"])
 
-        if uploaded_file:
+    if uploaded_file:
 
-            df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith("xlsx") else pd.read_csv(uploaded_file)
+        # Read file automatically
+        if uploaded_file.name.endswith("xlsx"):
+            df = pd.read_excel(uploaded_file, engine="openpyxl")
+        else:
+            df = pd.read_csv(uploaded_file)
 
-            df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
+        st.subheader("📄 Raw Data")
+        st.dataframe(df)
 
-            required_cols = ["date", "product", "quantity", "selling_price", "cost_price"]
+        # Detect numeric columns
+        numeric_cols = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
 
-            if not all(col in df.columns for col in required_cols):
-                st.error("Required columns: Date, Product, Quantity, Selling Price, Cost Price")
-                st.stop()
+        if len(numeric_cols) == 0:
+            st.warning("No numeric columns found to visualize.")
+            st.stop()
 
-            df["date"] = pd.to_datetime(df["date"])
-            df["sales"] = df["quantity"] * df["selling_price"]
-            df["expenses"] = df["quantity"] * df["cost_price"]
-            df["profit"] = df["sales"] - df["expenses"]
+        st.subheader("📈 Auto Visualization")
 
-            st.dataframe(df)
+        # If date column exists, convert automatically
+        for col in df.columns:
+            if "date" in col.lower():
+                try:
+                    df[col] = pd.to_datetime(df[col])
+                except:
+                    pass
 
-            daily = df.groupby("date")[["sales"]].sum().reset_index()
-            forecast_df = daily.rename(columns={"date": "ds", "sales": "y"})
+        # Case 1: If Date + Numeric exists → Time Series
+        date_cols = df.select_dtypes(include=["datetime64"]).columns.tolist()
 
-            model = Prophet()
-            model.fit(forecast_df)
+        if date_cols:
+            date_col = st.selectbox("Select Date Column", date_cols)
+            value_col = st.selectbox("Select Value Column", numeric_cols)
 
-            future = model.make_future_dataframe(periods=7)
-            forecast = model.predict(future)
+            grouped = df.groupby(date_col)[value_col].sum().reset_index()
 
-            fig = plot_plotly(model, forecast)
+            fig = px.line(grouped, x=date_col, y=value_col, title="Time Series Trend")
             st.plotly_chart(fig, use_container_width=True)
+
+        else:
+            # Case 2: No Date → Bar / Pie / Histogram
+            value_col = st.selectbox("Select Numeric Column", numeric_cols)
+
+            chart_type = st.radio(
+                "Choose Chart Type",
+                ["Bar Chart", "Pie Chart", "Histogram", "Box Plot"]
+            )
+
+            if chart_type == "Bar Chart":
+                fig = px.bar(df, y=value_col, title="Bar Chart")
+            elif chart_type == "Pie Chart":
+                fig = px.pie(df, values=value_col, names=df.columns[0])
+            elif chart_type == "Histogram":
+                fig = px.histogram(df, x=value_col)
+            else:
+                fig = px.box(df, y=value_col)
+
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Show Summary Metrics
+        st.subheader("📊 Summary Statistics")
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total", f"{df[numeric_cols].sum().sum():,.2f}")
+        col2.metric("Average", f"{df[numeric_cols].mean().mean():,.2f}")
+        col3.metric("Rows", len(df))
+
+        st.success("✅ Analytics Generated Automatically!")
 
 # ==========================================================
 # ================= REPORTS ================================
