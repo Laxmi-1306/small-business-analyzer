@@ -861,4 +861,4 @@ else:
     if page == "🚪 Logout":
 
         st.session_state.user_id=None
-        st.rerun()
+        st.experimental_rerun()
