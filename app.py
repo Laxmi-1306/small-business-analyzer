@@ -5,7 +5,6 @@ from prophet import Prophet
 from prophet.plot import plot_plotly
 import sqlite3
 from fpdf import FPDF
-from auth import create_token, verify_token
 import os
 from datetime import datetime
 # ------------------ CONFIG ------------------
@@ -17,41 +16,35 @@ st.set_page_config(
 
 # ------------------ PROFESSIONAL UI STYLE ------------------
 
+
 st.markdown("""
 <style>
-
 /* App Background */
 [data-testid="stAppViewContainer"]{
     background-color:#f4f6fb;
 }
-
 /* Sidebar */
 [data-testid="stSidebar"]{
     background-color:#1f2b3e;
 }
-
 [data-testid="stSidebar"] *{
-    color:white;
+    color:black;
 }
-
-/* Main container card */
+/* Main container */
 .block-container{
     background:white;
     padding:25px;
     border-radius:12px;
     box-shadow:0 4px 20px rgba(0,0,0,0.08);
 }
-
 /* Titles */
 h1{
     color:#1f4e79;
     font-weight:700;
 }
-
 h2,h3{
     color:#2c3e50;
 }
-
 /* Buttons */
 .stButton>button{
     background:#1f77b4;
@@ -61,11 +54,9 @@ h2,h3{
     padding:10px;
     font-weight:500;
 }
-
 .stButton>button:hover{
     background:#155a8a;
 }
-
 /* Metric cards */
 [data-testid="metric-container"]{
     background:white;
@@ -73,27 +64,17 @@ h2,h3{
     padding:15px;
     box-shadow:0 2px 10px rgba(0,0,0,0.05);
 }
-
-/* Data tables */
-.stDataFrame{
-    background:white;
-    border-radius:10px;
-    border:1px solid #e5e7eb;
-}
-
 /* Input boxes */
 .stTextInput input{
     border-radius:8px;
 }
-
 .stNumberInput input{
     border-radius:8px;
 }
-
 </style>
 """, unsafe_allow_html=True)
-ADMIN_PASSWORD = "admin123"
 
+ADMIN_PASSWORD = "admin123"
 # ------------------ DATABASE ------------------
 
 conn = sqlite3.connect("business.db", check_same_thread=False)
@@ -149,6 +130,16 @@ cost REAL,
 price REAL
 )
 """)
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS user_sessions(
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+user_id INTEGER,
+login_time TEXT,
+logout_time TEXT
+)
+""")
+
 
 conn.commit()
 
@@ -252,7 +243,21 @@ if not st.session_state.user_id:
             if user:
                 st.session_state.user_id = user[0]
                 st.session_state.username = username
-                st.rerun()
+
+    # Store login time
+                login_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                cursor.execute("""
+                INSERT INTO user_sessions(user_id, login_time)
+                VALUES(?,?)
+                """, (user[0], login_time))
+
+                conn.commit()
+
+    # Save session ID
+                st.session_state.session_id = cursor.lastrowid
+
+                st.experimental_rerun()
             else:
                 st.error("Invalid credentials")
 
@@ -266,7 +271,7 @@ else:
 
     page = st.sidebar.radio(
         "Navigation",
-        ["📊 Dashboard", "📦 Inventory", "📁 Upload Excel", "📑 Reports", "🧑‍💼 Admin", "🚪 Logout"]
+        ["📊 Dashboard", "📦 Inventory", "📁 Upload Excel","📈 Forecast (AI)", "📑 Reports", "🧑‍💼 Admin", "🚪 Logout"]
     )
     if page != "🧑‍💼 Admin":
       st.session_state.admin_access = False
@@ -310,7 +315,19 @@ else:
             st.markdown("### ➕ Add Transaction")
 
             t_type = st.radio("Type", ["Sale", "Expense"])
-            amount = st.number_input("Amount", min_value=0.0)
+
+            cursor.execute(
+               "SELECT product, quantity, cost, price FROM inventory WHERE business_id=?",
+                (business_id,)
+            )
+            products = cursor.fetchall()
+
+            product_names = [p[0] for p in products]
+
+            selected_product = st.selectbox("Select Product", product_names)
+
+            qty = st.number_input("Quantity Sold", min_value=1)
+
             category = st.text_input("Category")
             receipt = st.file_uploader("Upload Receipt / Invoice", type=["png","jpg","jpeg","pdf"])
             # ------------------ MANUAL DATE INPUT ------------------
@@ -318,38 +335,99 @@ else:
             transaction_date_str = transaction_date.strftime("%Y-%m-%d")  # Convert to string for DB
             if st.button("Add Transaction"):
 
-                 receipt_path = None
+                receipt_path = None
 
-                 if receipt is not None:
+                if receipt is not None:
+                    os.makedirs("receipts", exist_ok=True)
+                    file_path = os.path.join("receipts", receipt.name)
 
-                      os.makedirs("receipts", exist_ok=True)
-                      file_path = os.path.join("receipts", receipt.name)
+                    with open(file_path, "wb") as f:
+                       f.write(receipt.getbuffer())
 
-                      with open(file_path, "wb") as f:
-                          f.write(receipt.getbuffer())
+                    receipt_path = file_path
 
-                      receipt_path = file_path
+    # Get product details
+                cursor.execute("""
+                    SELECT quantity, cost, price
+                    FROM inventory
+                    WHERE product=? AND business_id=?
+                """, (selected_product, business_id))
 
-    # Save current date
-                 
+                product_data = cursor.fetchone()
 
-                 cursor.execute("""
-                 INSERT INTO transactions(user_id,business_id,type,amount,category,receipt,date)
-                 VALUES(?,?,?,?,?,?,?)
-                 """, (
-                  st.session_state.user_id,
-                 business_id,
-                 t_type,
-                 amount,
-                 category,
-                 receipt_path,
-                 transaction_date_str
-                 ))
+                if product_data:
 
-                 conn.commit()
+                    stock, cost_price, selling_price = product_data
 
-                 st.success(f"✅ Transaction Added for {transaction_date_str}")
+                    if t_type == "Sale":
 
+                       if qty > stock:
+                          st.error("❌ Not enough stock available")
+                       else:
+
+                # Calculate values
+                          sales_amount = qty * selling_price
+                          expense_amount = qty * cost_price
+                          profit = sales_amount - expense_amount
+
+                # Insert sale
+                          cursor.execute("""
+                             INSERT INTO transactions
+                             (user_id, business_id, type, amount, category, receipt, date)
+                              VALUES (?,?,?,?,?,?,?)
+                          """, (
+                               st.session_state.user_id,
+                               business_id,
+                               "Sale",
+                               sales_amount,
+                               category,
+                               receipt_path,
+                               transaction_date_str
+                           ))
+
+                # Insert cost as expense (COGS)
+                          cursor.execute("""
+                              INSERT INTO transactions
+                              (user_id, business_id, type, amount, category, date)
+                              VALUES (?,?,?,?,?,?)
+                          """, (
+                               st.session_state.user_id,
+                               business_id,
+                               "Expense",
+                               expense_amount,
+                               "COGS",
+                               transaction_date_str
+                               ))
+
+                # Reduce stock
+                          cursor.execute("""
+                                 UPDATE inventory
+                                 SET quantity = quantity - ?
+                                 WHERE product=? AND business_id=?
+                                 """, (qty, selected_product, business_id))
+
+                          conn.commit()
+
+                          st.success(f"✅ Sale recorded! Profit: ₹{profit}")
+
+                else:
+            # Normal expense
+                    cursor.execute("""
+                        INSERT INTO transactions
+                        (user_id, business_id, type, amount, category, receipt, date)
+                         VALUES (?,?,?,?,?,?,?)
+                         """, (
+                            st.session_state.user_id,
+                            business_id,
+                            "Expense",
+                             amount,
+                             category,
+                             receipt_path,
+                             transaction_date_str
+                         ))
+
+                    conn.commit()
+                    st.success("Expense added")
             cursor.execute(
                 "SELECT id,type,amount,category,receipt,date FROM transactions WHERE business_id=?",
                 (business_id,)
@@ -361,7 +439,32 @@ else:
 
                 df = pd.DataFrame(rows, columns=["id","type","amount","category","receipt","date"])
                 df["date"] = pd.to_datetime(df["date"])
+                # ---------------- DATE FILTER ----------------
+                st.subheader("📅 Filter by Date")
+                col1, col2 = st.columns(2)
+                start_date = col1.date_input("Start Date", value=df["date"].min())
+                end_date = col2.date_input("End Date", value=df["date"].max())
+# Convert to datetime
+                start_date = pd.to_datetime(start_date)
+                end_date = pd.to_datetime(end_date)
+                # Apply filter
+                df = df[(df["date"] >= start_date) & (df["date"] <= end_date)]
                 st.dataframe(df, use_container_width=True)
+                total_sales = df[df["type"] == "Sale"]["amount"].sum()
+                total_expense = df[df["type"] == "Expense"]["amount"].sum()
+                net_profit = total_sales - total_expense
+                
+                col1, col2, col3 = st.columns(3)
+
+                col1.metric("💰 Total Sales", f"₹ {total_sales}")
+                col2.metric("📉 Total Expense", f"₹ {total_expense}")
+                col3.metric("📊 Net Profit", f"₹ {net_profit}")
+                # ---------------- PROFIT MARGIN ----------------
+                if total_sales > 0:
+                    profit_margin = (total_sales - total_expense) / total_sales * 100
+                else:
+                    profit_margin = 0
+                st.metric("📈 Profit Margin", f"{profit_margin:.2f}%")    
                 # -------- WEEKLY SALES SUMMARY --------
                 st.subheader("📊 Weekly Sales Summary")
 
@@ -401,6 +504,22 @@ else:
                 )
 
                 st.plotly_chart(fig_month)
+                # ---------------- CATEGORY-WISE PROFIT ----------------
+                st.subheader("📊 Category-wise Profit")
+
+                category_profit = df.groupby("category").apply(
+                    lambda x: x[x["type"]=="Sale"]["amount"].sum()
+                             - x[x["type"]=="Expense"]["amount"].sum()
+                ).reset_index(name="profit")
+
+                fig_cat = px.bar(
+                  category_profit,
+                  x="category",
+                  y="profit",
+                  title="Category-wise Profit"
+                )
+
+                st.plotly_chart(fig_cat)
                 # ---------------- AI BUSINESS INSIGHTS ----------------
                 st.subheader("💡 Business Insights")
 
@@ -433,6 +552,44 @@ else:
 # Display in Streamlit
                 for insight in insights:
                     st.info(insight)
+                # ---------------- SMART RECOMMENDATION ----------------
+                if profit_margin < 10:
+                    st.warning("⚠️ Low profit margin. Try reducing costs or increasing price.")
+                elif profit_margin > 30:
+                    st.success("💰 Excellent profit margin!")
+                else:
+                    st.info("👍 Profit margin is moderate. Monitor regularly.")
+                # ================= ADVANCED INSIGHTS =================
+
+                # 🏆 Best Category
+                cursor.execute("""
+                SELECT category, SUM(amount)
+                FROM transactions
+                WHERE type='Sale' AND business_id=?
+                GROUP BY category
+                ORDER BY SUM(amount) DESC
+                LIMIT 1
+                """, (business_id,))
+
+                top = cursor.fetchone()
+
+                if top:
+                    st.success(f"🏆 Best Category: {top[0]}")
+
+                # 📉 Worst Category
+                cursor.execute("""
+                SELECT category, SUM(amount)
+                FROM transactions
+                WHERE type='Sale' AND business_id=?
+                GROUP BY category
+                ORDER BY SUM(amount) ASC
+                LIMIT 1
+                """, (business_id,))
+
+                low = cursor.fetchone()
+
+                if low:
+                    st.warning(f"📉 Lowest Category: {low[0]}")    
                 selected_id = st.selectbox("Select Transaction", df["id"])
 
                 selected_row = df[df["id"] == selected_id].iloc[0]
@@ -445,7 +602,7 @@ else:
                     conn.commit()
 
                     st.success("Deleted")
-                    st.rerun()
+                    st.experimental_rerun()
 
                 if col2.button("Edit Transaction"):
 
@@ -476,7 +633,7 @@ else:
 
                         st.success("Updated Successfully")
                         st.session_state.edit_mode=False
-                        st.rerun()
+                        st.experimental_rerun()
 
 # =====================================================
 # INVENTORY
@@ -563,9 +720,9 @@ else:
               st.plotly_chart(fig_hist)
             else:
               st.info("No inventory records found for this business.")
-# =====================================================
-# FORECASTING
-# =====================================================
+    # =====================================================
+    # FORECASTING
+    # =====================================================
 
     if page == "📁 Upload Excel":
 
@@ -587,10 +744,16 @@ else:
             numeric = df.select_dtypes(include=["int64","float64"]).columns
             value_col = st.selectbox("Value Column", numeric)
 
-            df[date_col] = pd.to_datetime(df[date_col])
+            df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
 
-            data = df[[date_col,value_col]].rename(
-                columns={date_col:"ds",value_col:"y"}
+            if df[date_col].isna().all():
+                st.error("❌ Selected column is not a valid date column")
+                st.stop()
+
+            df = df.dropna(subset=[date_col])
+
+            data = df[[date_col, value_col]].rename(
+                columns={date_col: "ds", value_col: "y"}
             )
 
             model = Prophet()
@@ -599,15 +762,82 @@ else:
             future = model.make_future_dataframe(periods=30)
             forecast = model.predict(future)
 
-            fig = plot_plotly(model,forecast)
-
-            fig.update_layout(
-                title="📈 30 Day Sales Forecast",
-                template="plotly_white"
-            )
+            fig = plot_plotly(model, forecast)
 
             st.plotly_chart(fig)
+# =====================================================
+# FORECAST FROM DATABASE
+# =====================================================
 
+    if page == "📈 Forecast (AI)":
+
+       st.header("📈 AI Sales Forecast ")
+
+       cursor.execute(
+          "SELECT id,name FROM businesses WHERE user_id=?",
+          (st.session_state.user_id,)
+       )
+
+       businesses = cursor.fetchall()
+
+       if businesses:
+
+          business = st.selectbox(
+            "Select Business",
+            businesses,
+            format_func=lambda x: x[1]
+          )
+
+          business_id = business[0]
+
+        # Fetch sales data
+          cursor.execute("""
+            SELECT date, amount 
+            FROM transactions 
+            WHERE business_id=? AND type='Sale'
+          """, (business_id,))
+
+          data = cursor.fetchall()
+
+          if data:
+
+            df = pd.DataFrame(data, columns=["date", "amount"])
+
+            df["date"] = pd.to_datetime(df["date"])
+
+            # Prepare for Prophet
+            df = df.rename(columns={"date": "ds", "amount": "y"})
+
+            # Group by date (important)
+            df = df.groupby("ds")["y"].sum().reset_index()
+
+            st.dataframe(df)
+
+            # ---------------- TRAIN TEST SPLIT ----------------
+            if len(df) > 10: 
+                train =df[:-7]
+                test = df[-7:]
+
+                model = Prophet()
+                model.fit(train)
+
+                future = model.make_future_dataframe(periods=7)
+                forecast = model.predict(future)
+                # ---------------- ACCURACY ----------------
+                pred = forecast[["ds", "yhat"]].tail(7)
+                merged = test.merge(pred, on="ds")
+
+                from sklearn.metrics import mean_absolute_error
+
+                mae = mean_absolute_error(merged["y"], merged["yhat"])
+
+                st.metric("📉 Forecast Error (MAE)", f"{mae:.2f}")
+                 # ---------------- PLOT ----------------
+                fig = plot_plotly(model, forecast)
+                st.plotly_chart(fig)
+
+          else:
+            st.warning("Not enough data for accuracy calculation (need at least 10 records)")
 # =====================================================
 # REPORTS
 # =====================================================
@@ -707,7 +937,7 @@ else:
 
                     st.session_state.admin_access=True
                     st.success("Access granted")
-                    st.rerun()
+                    st.experimental_rerun()
 
                 else:
                     st.error("Wrong password")
@@ -731,12 +961,12 @@ else:
 
             st.subheader("Manage Users")
 
-            cursor.execute("SELECT id,username FROM users")
+            cursor.execute("SELECT id,username,password FROM users")
             user_data = cursor.fetchall()
 
             if user_data:
 
-                user_df = pd.DataFrame(user_data,columns=["User ID","Username"])
+                user_df = pd.DataFrame(user_data,columns=["User ID","Username","password"])
                 st.dataframe(user_df,use_container_width=True)
 
                 selected_user = st.selectbox("Select User",user_df["User ID"])
@@ -749,7 +979,7 @@ else:
                     conn.commit()
 
                     st.success("User deleted")
-                    st.rerun()
+                    st.experimental_rerun()
 
                 new_password = col2.text_input("New Password for User",type="password")
 
@@ -762,7 +992,28 @@ else:
 
                     conn.commit()
                     st.success("Password updated successfully")
+            st.subheader("🕒 User Login Activity")
 
+            cursor.execute("""
+            SELECT users.username, user_sessions.login_time, user_sessions.logout_time
+            FROM user_sessions
+            JOIN users ON user_sessions.user_id = users.id
+            ORDER BY user_sessions.id DESC
+            """)
+
+            session_data = cursor.fetchall()
+
+            if session_data:
+
+               session_df = pd.DataFrame(
+               session_data,
+               columns=["Username", "Login Time", "Logout Time"]
+               )
+
+               st.dataframe(session_df, use_container_width=True)
+
+            else:
+               st.info("No session data available")
             st.subheader("Manage Businesses")
 
             cursor.execute("""
@@ -790,7 +1041,7 @@ else:
                     conn.commit()
 
                     st.success("Business deleted")
-                    st.rerun()
+                    st.experimental_rerun()
 
             st.subheader("System Usage Monitoring")
 
@@ -843,7 +1094,7 @@ else:
                     conn.commit()
 
                     st.success("Invalid transaction removed")
-                    st.rerun()
+                    st.experimental_rerun()
 
             else:
 
@@ -852,7 +1103,7 @@ else:
             if st.button("Logout Admin"):
 
                 st.session_state.admin_access=False
-                st.rerun()
+                st.experimental_rerun()
 
 # =====================================================
 # LOGOUT
@@ -860,5 +1111,17 @@ else:
 
     if page == "🚪 Logout":
 
-        st.session_state.user_id=None
-        st.experimental_rerun()
+       if "session_id" in st.session_state:
+
+           logout_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+           cursor.execute("""
+           UPDATE user_sessions
+           SET logout_time=?
+           WHERE id=?
+           """, (logout_time, st.session_state.session_id))
+
+           conn.commit()
+
+       st.session_state.user_id = None
+       st.experimental_rerun()
